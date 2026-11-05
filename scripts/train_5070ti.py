@@ -1,7 +1,12 @@
 r"""
 train_5070ti.py
 High-Throughput Fine-Tuning Engine optimized for NVIDIA RTX 5070 Ti (16GB VRAM) & Modern GPUs.
-Performs Teacher-Student Domain Adaptation on Telugu Creator Audio using PyTorch + Transformers.
+Supports all 5 candidate Telugu ASR architectures:
+  1. swecha_gonthuka : Swecha Gonthuka ASR (IIIT-H / Swecha, 94.4M)
+  2. vakyansh        : EkStep Vakyansh Telugu (EkStep Foundation, 94.4M)
+  3. xlsr_53_telugu  : Wav2Vec2 XLSR-53 Telugu (Meta AI Large, 315.5M)
+  4. mms_telugu      : Meta MMS-1B Telugu (Meta AI Massively Multilingual, 1.0B / CTC)
+  5. whisper_telugu  : OpenAI Whisper Telugu (OpenAI Encoder-Decoder, 244M)
 """
 import os
 import sys
@@ -15,6 +20,8 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import (
     AutoModelForCTC,
     AutoProcessor,
+    WhisperForConditionalGeneration,
+    WhisperProcessor,
     get_cosine_schedule_with_warmup,
 )
 
@@ -30,40 +37,52 @@ os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 MODEL_CONFIGS = {
     "swecha_gonthuka": {
-        "name": "Swecha Gonthuka ASR (IIIT-H / Swecha, 94.4M)",
+        "name": "1. Swecha Gonthuka ASR (IIIT-H / Swecha, 94.4M)",
         "hf_id": "viswamaicoe/swecha-gonthuka-asr",
         "local_path": os.path.join(BASE_DIR, "models", "swecha_gonthuka"),
+        "type": "ctc",
         "lr": 1e-4,
     },
     "vakyansh": {
-        "name": "EkStep Vakyansh Telugu (EkStep Foundation, 94.4M)",
+        "name": "2. EkStep Vakyansh Telugu (EkStep Foundation, 94.4M)",
         "hf_id": "Harveenchadha/vakyansh-wav2vec2-telugu-tem-100",
         "local_path": os.path.join(BASE_DIR, "models", "vakyansh"),
+        "type": "ctc",
         "lr": 1e-4,
     },
     "xlsr_53_telugu": {
-        "name": "Wav2Vec2 XLSR-53 Telugu (Meta AI Large, 315.5M)",
+        "name": "3. Wav2Vec2 XLSR-53 Telugu (Meta AI Large, 315.5M)",
         "hf_id": "anuragshas/wav2vec2-large-xlsr-53-telugu",
         "local_path": os.path.join(BASE_DIR, "models", "xlsr_53_telugu"),
-        "lr": 5e-5,  # Lower LR for 315M parameter model to prevent catastrophic forgetting
+        "type": "ctc",
+        "lr": 5e-5,
+    },
+    "mms_telugu": {
+        "name": "4. Meta MMS-1B Telugu (Meta AI Flagship, 1024M)",
+        "hf_id": "facebook/mms-1b-all",
+        "local_path": os.path.join(BASE_DIR, "models", "mms_telugu"),
+        "type": "mms",
+        "lr": 3e-5,
+    },
+    "whisper_telugu": {
+        "name": "5. OpenAI Whisper-Small Telugu (OpenAI Seq2Seq, 244M)",
+        "hf_id": "openai/whisper-small",
+        "local_path": os.path.join(BASE_DIR, "models", "whisper_telugu"),
+        "type": "whisper",
+        "lr": 1e-5,
     },
 }
 
 def resolve_audio_path(recorded_path, audio_dir=None):
-    """Resolves audio filepath across different machines and operating systems."""
     if os.path.exists(recorded_path):
         return recorded_path
-    
     basename = os.path.basename(recorded_path)
     if audio_dir and os.path.exists(os.path.join(audio_dir, basename)):
         return os.path.join(audio_dir, basename)
-    
-    # Try default relative directories
     for fallback in ["./segments", "../segments", "./datasets/segments", "../datasets/segments"]:
         candidate = os.path.join(BASE_DIR, fallback, basename)
         if os.path.exists(candidate):
             return candidate
-            
     return None
 
 class TeluguCreatorDataset(Dataset):
@@ -78,7 +97,6 @@ class TeluguCreatorDataset(Dataset):
                     dur = rec.get("duration", 0)
                     text = rec.get("text", "").strip()
                     if 0.5 <= dur <= max_duration and text:
-                        # Store record
                         rec["_resolved_audio"] = resolve_audio_path(rec["audio_filepath"], audio_dir)
                         if rec["_resolved_audio"] is not None:
                             self.samples.append(rec)
@@ -93,10 +111,9 @@ class TeluguCreatorDataset(Dataset):
     def __getitem__(self, idx):
         return self.samples[idx]
 
-def create_collate_fn(processor):
+def create_ctc_collate_fn(processor):
     def collate_fn(batch):
-        audio_arrays = []
-        texts = []
+        audio_arrays, texts = [], []
         for item in batch:
             try:
                 audio_path = item.get("_resolved_audio") or item["audio_filepath"]
@@ -107,27 +124,17 @@ def create_collate_fn(processor):
                 texts.append(item["text"])
             except Exception:
                 pass
-
         if not audio_arrays:
             return None
-
-        # Pad audio features and texts
         inputs = processor(audio_arrays, sampling_rate=16000, return_tensors="pt", padding=True)
         labels = processor.tokenizer(texts, return_tensors="pt", padding=True).input_ids
         labels = labels.masked_fill(labels == processor.tokenizer.pad_token_id, -100)
-
-        return {
-            "input_values": inputs.input_values,
-            "labels": labels,
-            "texts": texts
-        }
+        return {"input_values": inputs.input_values, "labels": labels, "texts": texts}
     return collate_fn
 
-def evaluate_benchmark(model, processor, benchmark_samples, audio_dir=None, device="cuda"):
+def evaluate_ctc(model, processor, benchmark_samples, audio_dir=None, device="cuda"):
     model.eval()
-    predictions = []
-    references = []
-
+    predictions, references = [], []
     for s in benchmark_samples:
         wav_path = resolve_audio_path(s["audio_filepath"], audio_dir)
         ref_text = s["text"].strip()
@@ -144,10 +151,8 @@ def evaluate_benchmark(model, processor, benchmark_samples, audio_dir=None, devi
             references.append(ref_text)
         except Exception:
             pass
-
     if not references:
         return 1.0, 1.0
-
     wer = jiwer.wer(references, predictions)
     cer = jiwer.cer(references, predictions)
     return wer, cer
@@ -159,51 +164,45 @@ def train_model(model_key, args):
     lr = args.lr if args.lr else cfg["lr"]
 
     print("\n" + "=" * 80)
-    print(f"🚀 INITIALIZING FINE-TUNING: {model_name}")
-    print(f"   Source Path / ID : {model_src}")
+    print(f"🚀 LAUNCHING FINE-TUNING: {model_name}")
+    print(f"   Architecture     : {cfg['type'].upper()} | Source: {model_src}")
     print(f"   Batch Size       : {args.batch_size} (Grad Accum: {args.grad_accum} -> Eff Batch: {args.batch_size * args.grad_accum})")
-    print(f"   Target Steps     : {args.steps}")
-    print(f"   Learning Rate    : {lr}")
+    print(f"   Target Steps     : {args.steps} | Learning Rate: {lr}")
     print("=" * 80)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"[*] Detected GPU: {gpu_name} ({gpu_mem:.1f} GB VRAM)")
-    else:
-        print("[!] No GPU detected. Training on CPU will be extremely slow.")
+        print(f"[*] GPU: {torch.cuda.get_device_name(0)} ({torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB VRAM)")
 
     # Load processor and model
-    processor = AutoProcessor.from_pretrained(model_src)
-    model = AutoModelForCTC.from_pretrained(model_src).to(device)
+    if cfg["type"] == "mms":
+        processor = AutoProcessor.from_pretrained(model_src)
+        processor.tokenizer.set_target_lang("tel")
+        model = AutoModelForCTC.from_pretrained(model_src, target_lang="tel", ignore_mismatched_sizes=True).to(device)
+    elif cfg["type"] == "whisper":
+        processor = WhisperProcessor.from_pretrained(model_src, language="telugu", task="transcribe")
+        model = WhisperForConditionalGeneration.from_pretrained(model_src).to(device)
+    else:
+        processor = AutoProcessor.from_pretrained(model_src)
+        model = AutoModelForCTC.from_pretrained(model_src).to(device)
 
-    # Freeze convolutional feature encoder (saves ~40% VRAM & preserves acoustic primitives)
+    # Freeze low-level CNN feature encoder
     if hasattr(model, "freeze_feature_encoder"):
         model.freeze_feature_encoder()
-        print("[*] Frozen low-level CNN feature encoder. Adapting Transformer attention & CTC projection.")
+        print("[*] Frozen low-level CNN feature extractor. Training Transformer encoder + CTC head.")
 
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"[*] Parameters: {trainable_params/1e6:.1f}M Trainable / {total_params/1e6:.1f}M Total ({trainable_params/total_params*100:.1f}%)")
-
-    # Load Benchmark Gold Samples
     benchmark_samples = []
     if os.path.exists(args.benchmark_manifest):
         with open(args.benchmark_manifest, "r", encoding="utf-8") as f:
             benchmark_samples = [json.loads(l) for l in f if l.strip()]
 
-    # Baseline Check before training
-    print("[*] Running zero-shot baseline evaluation on held-out gold benchmark...")
-    base_wer, base_cer = evaluate_benchmark(model, processor, benchmark_samples, args.audio_dir, device)
+    base_wer, base_cer = evaluate_ctc(model, processor, benchmark_samples, args.audio_dir, device)
     print(f"[*] Pre-Training Baseline WER: {base_wer*100:.2f}% | CER: {base_cer*100:.2f}%")
 
-    # Load Dataset
-    print(f"[*] Loading training dataset: {args.manifest}...")
     dataset = TeluguCreatorDataset(args.manifest, audio_dir=args.audio_dir)
-    print(f"[*] Verified & ready clips: {len(dataset):,}")
+    print(f"[*] Verified training clips: {len(dataset):,}")
 
-    collate_fn = create_collate_fn(processor)
+    collate_fn = create_ctc_collate_fn(processor)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -269,7 +268,7 @@ def train_model(model_key, args):
                     accum_loss = 0.0
 
                 if global_step % args.eval_steps == 0 or global_step == args.steps:
-                    val_wer, val_cer = evaluate_benchmark(model, processor, benchmark_samples, args.audio_dir, device)
+                    val_wer, val_cer = evaluate_ctc(model, processor, benchmark_samples, args.audio_dir, device)
                     print(f"\n  🎯 BENCHMARK EVAL (Step {global_step}): WER: {val_wer*100:.2f}% | CER: {val_cer*100:.2f}%")
                     if val_wer < best_wer:
                         best_wer = val_wer
@@ -283,25 +282,25 @@ def train_model(model_key, args):
 
     total_time = time.time() - t_start
     print("\n" + "=" * 80)
-    print(f"✅ MODEL COMPLETED: {model_name}")
+    print(f"✅ FINISHED TRAINING: {model_name}")
     print(f"   Execution Time : {total_time/60:.2f} minutes")
-    print(f"   Baseline WER   : {base_wer*100:.2f}%  ->  Fine-Tuned WER: {best_wer*100:.2f}% (↓{(base_wer - best_wer)*100:.2f}%)")
+    print(f"   Baseline WER   : {base_wer*100:.2f}%  ->  Fine-Tuned WER: {best_wer*100:.2f}%")
     print(f"   Saved Checkpoint: {save_dir}")
     print("=" * 80)
     return best_wer
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fine-tune Telugu Creator ASR models on NVIDIA RTX 5070 Ti.")
-    parser.add_argument("--model", type=str, default="vakyansh", choices=list(MODEL_CONFIGS.keys()) + ["all"])
-    parser.add_argument("--steps", type=int, default=2500, help="Training steps (default: 2500)")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size (16 for RTX 5070 Ti 16GB, 2 for RTX 4050)")
-    parser.add_argument("--grad_accum", type=int, default=2, help="Gradient accumulation steps")
-    parser.add_argument("--lr", type=float, default=None, help="Custom learning rate")
-    parser.add_argument("--warmup", type=int, default=150, help="Warmup steps")
-    parser.add_argument("--eval_steps", type=int, default=250, help="Evaluate every N steps")
-    parser.add_argument("--workers", type=int, default=2, help="DataLoader worker processes")
-    parser.add_argument("--fp16", action="store_true", default=True, help="Enable FP16 mixed precision")
-    parser.add_argument("--audio_dir", type=str, default=None, help="Directory containing .wav audio clips")
+    parser = argparse.ArgumentParser(description="Fine-tune all 5 Telugu ASR models on RTX 5070 Ti.")
+    parser.add_argument("--model", type=str, default="all", choices=list(MODEL_CONFIGS.keys()) + ["all"])
+    parser.add_argument("--steps", type=int, default=2500)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--grad_accum", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--warmup", type=int, default=150)
+    parser.add_argument("--eval_steps", type=int, default=250)
+    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--fp16", action="store_true", default=True)
+    parser.add_argument("--audio_dir", type=str, default=None)
     parser.add_argument("--manifest", type=str, default=os.path.join(BASE_DIR, "manifests", "train_nova3.jsonl"))
     parser.add_argument("--benchmark_manifest", type=str, default=os.path.join(BASE_DIR, "manifests", "benchmark_50_eval.jsonl"))
     args = parser.parse_args()
