@@ -1,11 +1,11 @@
 r"""
 download_dataset.py
 Downloads and extracts the verified Telugu Creator Audio Dataset (~7.6 GB)
-from the private HuggingFace dataset repository directly into ./segments/
+from the public HuggingFace dataset repository directly into ./segments/
 """
 import os
 import sys
-import zipfile
+import tarfile
 from huggingface_hub import hf_hub_download
 
 if sys.platform == "win32":
@@ -24,17 +24,17 @@ def download_and_extract():
     print("=" * 80)
 
     try:
-        print("[*] Fetching segments.zip from HuggingFace Hub (this may take a few minutes)...")
-        zip_path = hf_hub_download(
+        print("[*] Fetching segments.tar from HuggingFace Hub...")
+        tar_path = hf_hub_download(
             repo_id=REPO_ID,
-            filename="segments.zip",
+            filename="segments.tar",
             repo_type="dataset",
         )
-        print(f"[✓] Downloaded archive to: {zip_path}")
+        print(f"[✓] Downloaded archive to: {tar_path}")
         print(f"[*] Extracting clips to: {BASE_DIR}...")
         
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(BASE_DIR)
+        with tarfile.open(tar_path, "r") as tar_ref:
+            tar_ref.extractall(BASE_DIR)
             
         print(f"[✓] Dataset successfully extracted into: {TARGET_DIR}")
         print(f"[*] Total clips ready: {len(os.listdir(TARGET_DIR)):,}")
@@ -42,7 +42,6 @@ def download_and_extract():
         return True
     except Exception as e:
         print(f"[!] Error downloading dataset: {e}")
-        print("    --> Note: If access is denied, run `huggingface-cli login` on this machine first.")
         return False
 
 if __name__ == "__main__":
