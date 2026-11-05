@@ -1,0 +1,41 @@
+[
+  {
+    "id": "swecha_gonthuka",
+    "name": "Swecha Gonthuka ASR (IIIT-H / Swecha)",
+    "params": "94.4M",
+    "wer": 87.12,
+    "cer": 56.96,
+    "rtf": 0.0056,
+    "audio_seconds": 241.6,
+    "infer_seconds": 1.35,
+    "samples": 48,
+    "sample_pred": "్ ్ప్",
+    "sample_ref": "ఇంగ్లీష్ ఎన్క్యూ ఆయన అయితే హ్యూమన్ గిట్టుద్దు ఎన్క్యూ ఫన్ గిట్టుద్దు అలారి"
+  },
+  {
+    "id": "vakyansh",
+    "name": "EkStep Vakyansh Telugu (AI4Bharat Partner)",
+    "params": "94.4M",
+    "wer": 102.15,
+    "cer": 145.01,
+    "rtf": 0.0037,
+    "audio_seconds": 241.6,
+    "infer_seconds": 0.9,
+    "samples": 48,
+    "sample_pred": "<s>లా<s>",
+    "sample_ref": "ఇంగ్లీష్ ఎన్క్యూ ఆయన అయితే హ్యూమన్ గిట్టుద్దు ఎన్క్యూ ఫన్ గిట్టుద్దు అలారి"
+  },
+  {
+    "id": "xlsr_53_telugu",
+    "name": "Wav2Vec2 XLSR-53 Telugu (Meta AI Base)",
+    "params": "315.5M",
+    "wer": 96.6,
+    "cer": 50.65,
+    "rtf": 0.0102,
+    "audio_seconds": 241.6,
+    "infer_seconds": 2.46,
+    "samples": 48,
+    "sample_pred": "ాను డిల ఇంగ్లేనికియ ఎనతి హ్యూమర్గిటతులు ఎనికి ఫంగిటతులుఆఅలాదీపోవ",
+    "sample_ref": "ఇంగ్లీష్ ఎన్క్యూ ఆయన అయితే హ్యూమన్ గిట్టుద్దు ఎన్క్యూ ఫన్ గిట్టుద్దు అలారి"
+  }
+]
