@@ -87,8 +87,17 @@ Verify GPU availability:
 python -c "import torch; print('CUDA Available:', torch.cuda.is_available(), '| Device:', torch.cuda.get_device_name(0), '| VRAM:', torch.cuda.get_device_properties(0).total_memory / 1e9, 'GB')"
 ```
 
-### Step 2: Mount / Link the Audio Clips
-Ensure the ~7.6 GB folder of `.wav` files is placed at `./segments` inside the `forge` folder, or note its absolute path (e.g. `D:\datasets\segments`).
+### Step 2: Download / Mount the Audio Clips
+You can obtain the ~7.6 GB audio clips in one of two ways:
+
+**Method A (Automated Cloud Download from HuggingFace):**
+```bash
+python scripts/download_dataset.py
+```
+*(This automatically downloads and extracts the entire `segments` audio archive directly into `forge/segments/`).*
+
+**Method B (Local / USB Transfer):**
+Place the `segments` folder directly inside `forge/segments/` (or specify `--audio_dir <path>`).
 
 Verify audio resolution:
 ```bash
